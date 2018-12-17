@@ -56,6 +56,11 @@ coverage.xml
 local_settings.py
 db.sqlite3
 
+# Notebook
+.ipynb
+
+**/.idea/
+
 # Flask stuff:
 instance/
 .webassets-cache
