@@ -8,6 +8,13 @@ GLOBAL_BRIGHTNESS_LO = 3
 GLOBAL_BRIGHTNESS_HI = 255 - GLOBAL_BRIGHTNESS_LO
 
 
+def iterate_patches(image, m, n):
+    h, w = image.shape
+    for i in range(h // m + 1):
+        for j in range(w // n + 1):
+            yield image[m * i:m * (i + 1), n * j:n * (j + 1)]
+
+
 class CameraNoiseTRNG:
     def __init__(self, calibration_frames=None):
         self.height = None
@@ -25,7 +32,7 @@ class CameraNoiseTRNG:
         self._brightness_hi = GLOBAL_BRIGHTNESS_HI
 
         self._calibrated = False
-        if calibration_frames:
+        if calibration_frames is not None:
             self.calibrate(calibration_frames)
 
     @staticmethod
@@ -36,10 +43,10 @@ class CameraNoiseTRNG:
             frames = load_photos_from_folder(frames)
         elif type(frames) in (list, tuple) and type(frames[0]) == str:
             frames = numpy_arrays_from_paths(frames, grayscale=True)
-        elif type(frames) == np.array:
+        elif type(frames) in (np.array, np.ndarray):
             pass
         else:
-            raise TypeError
+            raise TypeError(f'Type {type(frames)} not supported.')
 
         return frames
 
@@ -51,12 +58,13 @@ class CameraNoiseTRNG:
         frames = self._validate_and_load_frames(frames)
 
         self.height, self.width = frames.shape[1:]
+        self._calibration_frame_count = len(frames)
 
         self._mean_brightness = np.round(np.mean(frames, axis=0))
         self._std_brightness = np.std(frames, axis=0)
         self._mean_last_bit = np.mean(frames & 1, axis=0)
 
-        conf_interval = 0.03  # TODO: put an accurate formula depending on N
+        conf_interval = 0.005
 
         self.mask = (self._mean_last_bit >= 0.5 - conf_interval) & (self._mean_last_bit <= 0.5 + conf_interval)
         self._calibrated = True
@@ -72,28 +80,44 @@ class CameraNoiseTRNG:
         total_bits_fed = 0
 
         for i, frame in enumerate(frames):
-            l_bits = frame[self.mask]
-            # strip over- and undersaturated pixels
-            l_bits = l_bits[l_bits <= self._brightness_hi]
-            l_bits = l_bits[l_bits >= self._brightness_lo]
-            # take only last bits
-            l_bits = l_bits & 1
+            patches = []
+            for patch in iterate_patches(frame, 3, 2):
+                l_bits = patch.reshape(-1)
+                # strip over- and undersaturated pixels
+                l_bits = l_bits[l_bits <= self._brightness_hi]
+                l_bits = l_bits[l_bits >= self._brightness_lo]
+                # take only last bits
+                l_bits = l_bits & 1
 
-            l_bits = l_bits.reshape(-1)
-            length = len(l_bits)
-            square_side = int(np.floor(np.sqrt(length)))
+                l_bits = l_bits.reshape(-1)
 
-            sq = bitarray(l_bits[:square_side * square_side].reshape(square_side, square_side).T.reshape(-1).tolist())
-            remainder = bitarray(l_bits[square_side * square_side:].tolist())
+                # length = len(l_bits)
+                if self._flip_bits:
+                    l_bits = 1 - l_bits
 
-            if self._flip_bits:
-                sq.invert()
-                remainder.invert()
+                patches.append(l_bits)
+
+                self._flip_bits = not self._flip_bits
+
+            frame_array = np.hstack(patches)
+
+            square_side = int(np.floor(np.sqrt(len(frame_array))))
+
+            aux = frame_array[:square_side * square_side].reshape(square_side, square_side).T
+            diags = []
+            for diag_index in range(-(square_side - 1), square_side):
+                diags.append(np.diagonal(aux, diag_index))
+
+            aux = np.hstack(diags)
+
+            sq = bitarray(aux.tolist())
+            remainder = bitarray(frame_array[square_side * square_side:].tolist())
 
             self._entropy_buffer = sq + remainder + self._entropy_buffer
 
-            total_bits_fed += length
-            self._flip_bits = not self._flip_bits
+            total_bits_fed += len(frame_array)
+
+        return total_bits_fed
 
     def mask(self):
         return self.mask
@@ -108,8 +132,9 @@ class CameraNoiseTRNG:
         if nbits > self.capacity():
             raise ValueError('Not enough entropy in the buffer.')
 
-        bits = self._entropy_buffer[:nbits]
-        self._entropy_buffer = self._entropy_buffer[nbits:]
+        bits = self._entropy_buffer[-nbits:]
+        for _ in range(nbits):
+            self._entropy_buffer.pop()
 
         return bits
 
