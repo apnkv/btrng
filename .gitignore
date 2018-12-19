@@ -77,6 +77,11 @@ target/
 # Jupyter Notebook
 .ipynb_checkpoints
 
+# Photos
+.jpg
+.heic
+.cr2
+
 # pyenv
 .python-version
 
